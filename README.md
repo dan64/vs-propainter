@@ -46,17 +46,17 @@ See `__init__.py` for the description of the parameters.
 
 ## Memory optimization and inference speed-up
 
-Video inpainting typically requires a significant amount of GPU memory. The filter offers various features that facilitate memory-efficient inference, effectively avoiding the Out-Of-Memory error. You can use the following options to reduce memory usage further:
+Video inpainting typically requires a significant amount of GPU memory. The filter offers various features that facilitate memory-efficient inference, effectively avoiding the _out of memory_ error. You can use the following options to reduce memory usage further:
 
 - Reduce the number of local neighbors through decreasing the parameter *neighbor_length* (default 10). 
 - Reduce the number of global references by increasing the parameter *ref_stride* (default 10).
 - Set the parameter *enable_fp16* to **True** to use fp16 (half precision) during inference.
 - Reduce the sequence's length of frames that the model processes, decreasing the parameter *length* (default 100).
- - Set a smaller mask region via the parameter *mask_region*. The mask region can specified using a tuple with the following format: (width, height, left, top). The reduction of the mask region will allow to speed up significantly the inference, expecially on HD movies, but the region must be big enough to allow the inference. In the case of bad output it will be necessary to increase its size.
+ - Set a smaller mask region via the parameter *mask_region*. The mask region can be specified using a _tuple_ with the following format: (width, height, left, top). The reduction of the mask region will allow to speed up significantly the inference, expecially on HD movies, but the region must be big enough to allow the inference. In the case of bad output it will be necessary to increase its size.
 
 With the only exception of parameter *length* the options to reduce the memory usage will allow also to speed up the inference's speed. 
 
-In the case the mask will not be able to totally remove the masked object it is possible to increase the parameter *mask_dilation* to extend the mask's size.
+In the case the mask will not be able to totally remove the masked object it is possible to increase the parameter *mask_dilation* to extend the mask's size (default 8).
 
 
 
