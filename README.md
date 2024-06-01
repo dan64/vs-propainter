@@ -32,11 +32,15 @@ clip = core.resize.Bicubic(clip=clip, format=vs.RGB24, matrix_in_s="709", range_
 from vspropainter import propainter
 
 # ProPainter using a mask image
-clip = propainter(clip, img_mask="sample.png")
+clip = propainter(clip, img_mask_path="sample.png")
 
 # ProPainter using a clip mask
 clipMask = core.lsmas.LWLibavSource(source="sample_mask.mp4", format="RGB24", cache=0)
 clip = propainter(clip, clip_mask=clipMask)
+
+# ProPainter using a mask image region
+clip = propainter(clip, img_mask_path="sample.png", mask_region=(460,280,68,28))
+
 ```
 See `__init__.py` for the description of the parameters.
 
