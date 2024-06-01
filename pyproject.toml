@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = [
+]
+
+[project]
+name = "vspropainter"
+version = "1.0.0"
+description = "ProPainter function for VapourSynth"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Dan64", email = "whitedan64@gmail.com"}]
+keywords = ["ProPainter", "VapourSynth"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Multimedia :: Video"
+]
+dependencies = [   
+  "numpy>=1.26.4",
+  "nvidia-cuda-runtime-cu12>=12.5.39"
+  "torchvision>=0.19.0",
+  "torch>=2.4.0",
+  "Pillow>=10.1.0",
+  "VapourSynth>=68",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/dan64/vs-propainter"
+"Bug Tracker" = "https://github.com/dan64/vs-propainter/issues"
