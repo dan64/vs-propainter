@@ -4,7 +4,7 @@ Improving Propagation and Transformer for Video Inpainting using Vapoursynth, ba
 The Vapoursynth filter version has the advantage of transforming the images directly in memory, without the need to use the filesystem to store the video frames. Using Vapoursynth the filter is faster and don't have any limitation on the number of frames that can be elaborated.
 
 ## Dependencies
-- [PyTorch](https://pytorch.org/get-started) 2.4.0 or later
+- [PyTorch](https://pytorch.org/get-started) 2.2.0 or later
 - [VapourSynth](http://www.vapoursynth.com/) R68 or later
 
 
