@@ -7,7 +7,7 @@ exclude = []
 
 [project]
 name = "vspropainter"
-version = "1.0.0"
+version = "1.0.1"
 description = "ProPainter function for VapourSynth"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,7 +26,7 @@ dependencies = [
   "torchvision>=0.17.0",
   "torch>=2.2.0",
   "Pillow>=10.1.0",
-  "VapourSynth>=68",
+  "VapourSynth>=65",
 ]
 
 [project.urls]
