@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-05-31
+LastEditTime: 2024-06-02
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -24,7 +24,7 @@ from functools import partial
 from .propainter_render import ModelProPainter
 from .propainter_utils import *
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
@@ -169,9 +169,9 @@ def propainter(
             ppaint.img_mask_crop(mask_region)
             base_c = clip_crop(base, mask_region)
             clip_c = clip_crop(clip, mask_region)
-            clip_crop = base_c.std.ModifyFrame(clips=[clip_c, base_c], selector=partial(inference_img_mask, v_clip=clip_c,
+            v_cropped = base_c.std.ModifyFrame(clips=[clip_c, base_c], selector=partial(inference_img_mask, v_clip=clip_c,
                                             ppaint=ppaint, batch_size=length, use_half=use_half))
-            clip_new = mask_overlay(clip, clip_crop, x=mask_region[2], y=mask_region[3])
+            clip_new = mask_overlay(clip, v_cropped, x=mask_region[2], y=mask_region[3])
     else:
         if mask_region is None:
             clip_new = base.std.ModifyFrame(clips=[clip, base, clip_mask], selector=partial(inference_clip_mask, v_clip=clip,
@@ -180,9 +180,9 @@ def propainter(
             base_c = clip_crop(base, mask_region)
             clip_mask_c = clip_crop(clip_mask, mask_region)
             clip_c = clip_crop(clip, mask_region)
-            clip_crop = base_c.std.ModifyFrame(clips=[clip_c, base_c, clip_mask_c], selector=partial(inference_clip_mask,
+            v_cropped = base_c.std.ModifyFrame(clips=[clip_c, base_c, clip_mask_c], selector=partial(inference_clip_mask,
                          v_clip=clip_c, m_clip=clip_mask_c, ppaint=ppaint, batch_size=length, use_half=use_half))
-            clip_new = mask_overlay(clip, clip_crop, x=mask_region[2], y=mask_region[3])
+            clip_new = mask_overlay(clip, v_cropped, x=mask_region[2], y=mask_region[3])
 
     return clip_new
 
