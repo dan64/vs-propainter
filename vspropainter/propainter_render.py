@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-05-29
+LastEditTime: 2024-06-05
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -28,8 +28,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 model_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "weights")
-
-# read frame-wise masks
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 os.environ["NUMEXPR_MAX_THREADS"] = "8"
@@ -94,6 +92,7 @@ class ModelProPainter:
         mask[mask <= th] = 0
         return mask
 
+    # read frame-wise masks
     def _read_mask(self, masks_img_list: list = None, flow_mask_dilates=8, mask_dilates=5):
 
         masks_dilated = []

@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-06-02
+LastEditTime: 2024-06-05
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -21,37 +21,38 @@ import torch
 import torch.nn.functional as F
 import vapoursynth as vs
 from functools import partial
-from .propainter_render import ModelProPainter
-from .propainter_utils import *
+from vspropainter.propainter_render import ModelProPainter
+from vspropainter.propainter_utils import *
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
 model_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "weights")
 
-#@torch.inference_mode()
+# @torch.inference_mode()
 def propainter(
-    clip: vs.VideoNode,
-    length: int = 100,
-    clip_mask: vs.VideoNode = None,
-    img_mask_path: str = None,
-    mask_dilation: int = 8,
-    neighbor_length: int = 10,
-    ref_stride: int = 10,
-    raft_iter: int = 20,
-    mask_region: tuple[int, int, int, int] = None,
-    weights_dir: str = model_dir,
-    enable_fp16: bool = True,
-    device_index: int = 0,
-    inference_mode: bool = False
+        clip: vs.VideoNode,
+        length: int = 100,
+        clip_mask: vs.VideoNode = None,
+        img_mask_path: str = None,
+        mask_dilation: int = 8,
+        neighbor_length: int = 10,
+        ref_stride: int = 10,
+        raft_iter: int = 20,
+        mask_region: tuple[int, int, int, int] = None,
+        sc_threshold: float = 0.1,
+        weights_dir: str = model_dir,
+        enable_fp16: bool = True,
+        device_index: int = 0,
+        inference_mode: bool = False
 ) -> vs.VideoNode:
     """ProPainter: Improving Propagation and Transformer for Video Inpainting
 
     :param clip:            Clip to process. Only RGB24 "full range" format is supported.
     :param length:          Sequence length that the model processes (min. 12 frames). High values will
                             increase the inference speed but will increase also the memory usage. Default: 100
-    :param clip_mask:       Clip mask, must be of the same size and lenght of input clip. Default: None
+    :param clip_mask:       Clip mask, must be of the same size and length of input clip. Default: None
     :param img_mask_path:   Path of the mask image, must be of the same size of input clip: Default: None
     :param mask_dilation:   Mask dilation for video and flow masking. Default: 8
     :param neighbor_length: Length of local neighboring frames. Low values decrease the memory usage.
@@ -62,8 +63,11 @@ def propainter(
                             affect the inference quality. Default: 10
     :param raft_iter:       Iterations for RAFT inference. Low values will increase the inference
                             speed but could affect the output quality. Default: 20
-    :param mask_region:     Allow to restirct the region of the mask, format: (width, height, left, top).
+    :param mask_region:     Allow to restrict the region of the mask, format: (width, height, left, top).
                             The region must be big enough to allow the inference. Default: None
+    :param weights_dir:     Path string of location of model weights.
+    :param sc_threshold:    If > 0 represent the scene change threshold used to generate the reference frames for
+                            ProPainter, range [0,1]. Default = 0.1
     :param enable_fp16:     If True use fp16 (half precision) during inference. Default: fp16 (for RTX30 or above)
     :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Default: 0
     :param inference_mode:  Enable/Disable torch inference mode. Default: False
@@ -80,9 +84,11 @@ def propainter(
         if clip_mask.num_frames != clip.num_frames:
             raise vs.Error("propainter: clip_mask must have the same length of clip")
         if clip_mask.width != clip.width:
-            raise vs.Error(f"propainter: clip_mask must have the same width of clip -> {clip_mask.width} <> {clip.width}")
+            raise vs.Error(
+                f"propainter: clip_mask must have the same width of clip -> {clip_mask.width} <> {clip.width}")
         if clip_mask.height != clip.height:
-            raise vs.Error(f"propainter: clip_mask must have the same height of clip -> {clip_mask.height} <> {clip.height}")
+            raise vs.Error(
+                f"propainter: clip_mask must have the same height of clip -> {clip_mask.height} <> {clip.height}")
         if clip_mask.format.id != vs.RGB24:
             raise vs.Error("propainter: only RGB24 clip_mask format is supported")
 
@@ -90,7 +96,7 @@ def propainter(
         if not is_img_file(img_mask_path):
             raise vs.Error("propainter: wrong image mask: " + img_mask_path)
 
-    if  (clip_mask is None) and (img_mask_path is None):
+    if (clip_mask is None) and (img_mask_path is None):
         raise vs.Error("propainter: a clip/image mask must be provided")
 
     if device_index != -1 and not torch.cuda.is_available():
@@ -114,22 +120,37 @@ def propainter(
         torch.backends.cudnn.benchmark = True
         torch.inference_mode()
 
+    # ----------------------------------------- INFERENCE -------------------------------------------------------------
+
     cache = {}
 
-    ppaint = ModelProPainter(device, weights_dir, img_mask_path, mask_dilation, neighbor_length,
-                             ref_stride, raft_iter)
-
     def inference_img_mask(n: int, f: list[vs.VideoFrame], v_clip: vs.VideoFrame = None, ppaint: ModelProPainter = None,
-                           batch_size: int = 25, use_half: bool = False) -> vs.VideoFrame:
+                           batch_size: int = 25, use_half: bool = False, sc_thresh: bool = False) -> vs.VideoFrame:
 
         if str(n) not in cache:
             cache.clear()
+            # vs.core.log_message(2, "Init Cache at frame_n = " + str(n))
 
             frames = [frame_to_image(f[0])]
+
             for i in range(1, batch_size):
+
                 if n + i >= v_clip.num_frames:
                     break
-                frames.append(frame_to_image(v_clip.get_frame(n + i)))
+
+                frame_i = v_clip.get_frame(n + i)
+
+                if sc_thresh:
+                    is_scenechange = (frame_i.props['_SceneChangePrev'] == 1 and frame_i.props['_SceneChangeNext'] == 0)
+                    is_scenechange = (len(frames) > 4) and is_scenechange
+                else:
+                    is_scenechange = False
+
+                if is_scenechange:
+                    # vs.core.log_message(2, "SceneDetect frame_n = " + str(n + i))
+                    break
+
+                frames.append(frame_to_image(frame_i))
 
             output = ppaint.get_unmasked_frames(video_frames=frames, batch_size=batch_size, use_half=use_half)
 
@@ -140,17 +161,34 @@ def propainter(
 
     def inference_clip_mask(n: int, f: list[vs.VideoFrame], v_clip: vs.VideoFrame = None, m_clip: vs.VideoFrame = None,
                             ppaint: ModelProPainter = None, batch_size: int = 25,
-                            use_half: bool = False) -> vs.VideoFrame:
+                            use_half: bool = False, sc_thresh: bool = False) -> vs.VideoFrame:
+
         if str(n) not in cache:
             cache.clear()
+            # vs.core.log_message(2, "Init Cache at frame_n = " + str(n))
 
             frames = [frame_to_image(f[0])]
             mask_frames = [frame_to_image(f[2])]
+
             for i in range(1, batch_size):
+
                 if n + i >= v_clip.num_frames:
                     break
+
+                frame_i = v_clip.get_frame(n + i)
+
+                if sc_thresh:
+                    is_scenechange = (frame_i.props['_SceneChangePrev'] == 1 and frame_i.props['_SceneChangeNext'] == 0)
+                    is_scenechange = (len(frames) > 4) and is_scenechange
+                else:
+                    is_scenechange = False
+
+                if is_scenechange:
+                    # vs.core.log_message(2, "SceneDetect frame_n = " + str(n + i))
+                    break
+
+                frames.append(frame_to_image(frame_i))
                 mask_frames.append(frame_to_image(m_clip.get_frame(n + i)))
-                frames.append(frame_to_image(v_clip.get_frame(n + i)))
 
             output = ppaint.get_unmasked_frames(video_frames=frames, mask_frames=mask_frames, use_half=use_half)
 
@@ -159,30 +197,40 @@ def propainter(
 
         return np_array_to_frame(cache[str(n)], f[1].copy())
 
+    # ----------------------------------------- ModifyFrame -----------------------------------------------------------
+
+    if sc_threshold > 0:
+        clip = scene_detect(clip, threshold=sc_threshold)
+        sc_thresh = True
+    else:
+        sc_thresh = False
+
+    ppaint = ModelProPainter(device, weights_dir, img_mask_path, mask_dilation, neighbor_length,
+                             ref_stride, raft_iter)
+
     base = clip.std.BlankClip(width=clip.width, height=clip.height, keep=True)
 
     if clip_mask is None:
         if mask_region is None:
             clip_new = base.std.ModifyFrame(clips=[clip, base], selector=partial(inference_img_mask, v_clip=clip,
-                                       ppaint=ppaint, batch_size=length, use_half=use_half))
+                       ppaint=ppaint, batch_size=length, use_half=use_half, sc_thresh=sc_thresh))
         else:
             ppaint.img_mask_crop(mask_region)
             base_c = clip_crop(base, mask_region)
             clip_c = clip_crop(clip, mask_region)
             v_cropped = base_c.std.ModifyFrame(clips=[clip_c, base_c], selector=partial(inference_img_mask, v_clip=clip_c,
-                                            ppaint=ppaint, batch_size=length, use_half=use_half))
+                        ppaint=ppaint, batch_size=length, use_half=use_half, sc_thresh=sc_thresh))
             clip_new = mask_overlay(clip, v_cropped, x=mask_region[2], y=mask_region[3])
     else:
         if mask_region is None:
             clip_new = base.std.ModifyFrame(clips=[clip, base, clip_mask], selector=partial(inference_clip_mask, v_clip=clip,
-                                           m_clip=clip_mask, ppaint=ppaint, batch_size=length, use_half=use_half))
+                       m_clip=clip_mask, ppaint=ppaint, batch_size=length, use_half=use_half, sc_thresh=sc_thresh))
         else:
             base_c = clip_crop(base, mask_region)
             clip_mask_c = clip_crop(clip_mask, mask_region)
             clip_c = clip_crop(clip, mask_region)
             v_cropped = base_c.std.ModifyFrame(clips=[clip_c, base_c, clip_mask_c], selector=partial(inference_clip_mask,
-                         v_clip=clip_c, m_clip=clip_mask_c, ppaint=ppaint, batch_size=length, use_half=use_half))
+                        v_clip=clip_c, m_clip=clip_mask_c, ppaint=ppaint, batch_size=length, use_half=use_half, sc_thresh=sc_thresh))
             clip_new = mask_overlay(clip, v_cropped, x=mask_region[2], y=mask_region[3])
 
     return clip_new
-

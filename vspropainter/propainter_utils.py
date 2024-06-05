@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-05-31
+LastEditTime: 2024-06-04
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -18,28 +18,35 @@ import logging
 from PIL import Image
 import numpy as np
 import vapoursynth as vs
+from functools import partial
+from typing import Sequence
 
 core = vs.core
 
 _IMG_EXTENSIONS = ['.png', '.PNG', 'jpg', 'JPG', '.jpeg', '.JPEG',
-    '.ppm', '.PPM', '.bmp', '.BMP']
+                   '.ppm', '.PPM', '.bmp', '.BMP']
+
 
 def frame_to_image(frame: vs.VideoFrame) -> Image:
     npArray = np.dstack([np.asarray(frame[plane]) for plane in range(frame.format.num_planes)])
     return Image.fromarray(npArray, 'RGB')
+
 
 def image_to_frame(img: Image, frame: vs.VideoFrame) -> vs.VideoFrame:
     npArray = np.array(img)
     [np.copyto(np.asarray(frame[plane]), npArray[:, :, plane]) for plane in range(frame.format.num_planes)]
     return frame
 
+
 def frame_to_np_array(frame: vs.VideoFrame) -> np.ndarray:
     npArray = np.dstack([np.asarray(frame[plane]) for plane in range(frame.format.num_planes)])
     return npArray
 
+
 def np_array_to_frame(npArray: np.ndarray, frame: vs.VideoFrame) -> vs.VideoFrame:
     [np.copyto(np.asarray(frame[plane]), npArray[:, :, plane]) for plane in range(frame.format.num_planes)]
     return frame
+
 
 def disable_warnings():
     logger_blocklist = [
@@ -50,8 +57,8 @@ def disable_warnings():
     for module in logger_blocklist:
         logging.getLogger(module).setLevel(logging.WARNING)
 
-def is_img_file(filename: str = "") -> bool:
 
+def is_img_file(filename: str = "") -> bool:
     if not os.path.isfile(filename):
         return False
 
@@ -59,19 +66,21 @@ def is_img_file(filename: str = "") -> bool:
 
     return (fname_ext in _IMG_EXTENSIONS)
 
+
 def clip_crop(clip: vs.VideoNode, region: tuple[int, int, int, int]) -> vs.VideoNode:
     return clip.std.CropAbs(width=region[0], height=region[1], left=region[2], top=region[3])
 
+
 def mask_overlay(
-    base: vs.VideoNode,
-    overlay: vs.VideoNode,
-    x: int = 0,
-    y: int = 0,
-    mask: Optional[vs.VideoNode] = None,
-    opacity: float = 1.0,
-    mode: str = 'normal',
-    planes: Optional[Union[int, Sequence[int]]] = None,
-    mask_first_plane: bool = True,
+        base: vs.VideoNode,
+        overlay: vs.VideoNode,
+        x: int = 0,
+        y: int = 0,
+        mask: vs.VideoNode | None = None,
+        opacity: float = 1.0,
+        mode: str = 'normal',
+        planes: (int | Sequence[int]) | None = None,
+        mask_first_plane: bool = True,
 ) -> vs.VideoNode:
     '''
     Puts clip overlay on top of clip base using different blend modes, and with optional x,y positioning, masking and opacity.
@@ -95,7 +104,8 @@ def mask_overlay(
         if not isinstance(mask, vs.VideoNode):
             raise vs.Error('mask_overlay: mask is not a clip')
 
-        if mask.width != overlay.width or mask.height != overlay.height or get_depth(mask) != get_depth(overlay):
+        if (mask.width != overlay.width or mask.height != overlay.height or
+                mask.format.bits_per_sample != overlay.format.bits_per_sample):
             raise vs.Error('mask_overlay: mask must have the same dimensions and bit depth as overlay')
 
     if base.format.sample_type == vs.INTEGER:
@@ -124,7 +134,8 @@ def mask_overlay(
         overlay = overlay.resize.Point(format=base.format)
 
     if mask is None:
-        mask = overlay.std.BlankClip(format=overlay.format.replace(color_family=vs.GRAY, subsampling_w=0, subsampling_h=0), color=peak)
+        mask = overlay.std.BlankClip(
+            format=overlay.format.replace(color_family=vs.GRAY, subsampling_w=0, subsampling_h=0), color=peak)
     elif mask.format.id != overlay.format.id and mask.format.color_family != vs.GRAY:
         mask = mask.resize.Point(format=overlay.format, range_s='full')
 
@@ -179,3 +190,39 @@ def mask_overlay(
     if base_orig is not None:
         last = last.resize.Point(format=base_orig.format)
     return last
+
+
+def scene_detect(clip: vs.VideoNode, threshold: float = 0.1, frequency: int = 0) -> vs.VideoNode:
+
+    if threshold == 0:
+        return clip
+
+    sc = clip.resize.Point(format=vs.GRAY8, matrix_s='709')
+
+    try:
+        sc = sc.misc.SCDetect(threshold=threshold)
+    except Exception as error:
+        raise vs.Error("propainter: plugin 'MiscFilters.dll' not properly loaded/installed: -> " + str(error))
+
+    def set_scene_change(n, f, freq: int = 0) -> vs.VideoFrame:
+
+        f_out = f[0].copy()
+
+        is_scenechange = (n == 0) or (f[1].props['_SceneChangePrev'] == 1 and f[1].props['_SceneChangeNext'] == 0)
+
+        if freq > 10:
+            is_scenechange = is_scenechange or (n % freq == 0)
+
+        if is_scenechange:
+            # vs.core.log_message(2, "SceneDetect n= " + str(n))
+            f_out.props['_SceneChangePrev'] = 1
+            f_out.props['_SceneChangeNext'] = 0
+        else:
+            f_out.props['_SceneChangePrev'] = 0
+            f_out.props['_SceneChangeNext'] = 0
+
+        return f_out
+
+    sc = clip.std.ModifyFrame(clips=[clip, sc], selector=partial(set_scene_change, freq=frequency))
+
+    return sc
