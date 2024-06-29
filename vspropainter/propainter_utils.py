@@ -23,7 +23,7 @@ from typing import Sequence
 
 core = vs.core
 
-_IMG_EXTENSIONS = ['.png', '.PNG', 'jpg', 'JPG', '.jpeg', '.JPEG',
+_IMG_EXTENSIONS = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG',
                    '.ppm', '.PPM', '.bmp', '.BMP']
 
 

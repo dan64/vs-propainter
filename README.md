@@ -44,6 +44,11 @@ clip = propainter(clip, clip_mask=clipMask)
 # ProPainter using a mask image region
 clip = propainter(clip, img_mask_path="sample.png", mask_region=(460,280,68,28))
 
+# ProPainter using outpainting
+w = clip.width + 8
+h = clip.high + 32
+clip = propainter(clip, model = 1, length=50, mask_dilation=0, outpaint_size=(w, h))
+
 ```
 See `__init__.py` for the description of the parameters.
 
