@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-06-23
+LastEditTime: 2025-11-25
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -24,7 +24,7 @@ from functools import partial
 from vspropainter.propainter_render import ModelProPainterIn, ModelProPainterOut
 from vspropainter.propainter_utils import *
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
@@ -42,6 +42,7 @@ def propainter(
         raft_iter: int = 20,
         mask_region: tuple[int, int, int, int] = None,
         sc_threshold: float = 0.0,
+        sc_min_freq: int = 0,
         model: int = 0,
         outpaint_size: tuple[int, int] = None,
         weights_dir: str = model_dir,
@@ -75,6 +76,8 @@ def propainter(
     :param weights_dir:     Path string of location of model weights.
     :param sc_threshold:    If > 0 represent the scene change threshold used to generate the reference frames for
                             ProPainter, range [0,1]. Default = 0.0
+    :param sc_min_freq:     Minimum number of frames that must elapse between two accepted scene changes.
+                            If > 0, it is clamped to a minimum of 5 frames. Default is 0 (no spacing enforced).
     :param enable_fp16:     If True use fp16 (half precision) during inference. Default: fp16 (for RTX30 or above)
     :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Default: 0
     :param inference_mode:  Enable/Disable torch inference mode. Default: False
@@ -84,9 +87,9 @@ def propainter(
         raise vs.Error("propainter: model must be 0 or 1")
 
     if model == 0:
-        return propainter_inpaint(clip, length, clip_mask, img_mask_path, mask_dilation,
-                                  neighbor_length, ref_stride, raft_iter, mask_region, sc_threshold,
-                                  weights_dir, enable_fp16, device_index, inference_mode)
+        return propainter_inpaint(clip, length, clip_mask, img_mask_path, mask_dilation, neighbor_length, ref_stride,
+                                  raft_iter, mask_region, sc_threshold, sc_min_freq, weights_dir, enable_fp16,
+                                  device_index, inference_mode)
     else:
         return propainter_outpaint(clip, length, outpaint_size, mask_dilation, neighbor_length,
                                    ref_stride, raft_iter, weights_dir, enable_fp16, device_index, inference_mode)
@@ -104,6 +107,7 @@ def propainter_inpaint(
         raft_iter: int = 20,
         mask_region: tuple[int, int, int, int] = None,
         sc_threshold: float = 0.1,
+        sc_min_freq: int = 0,
         weights_dir: str = model_dir,
         enable_fp16: bool = True,
         device_index: int = 0,
@@ -130,6 +134,8 @@ def propainter_inpaint(
     :param weights_dir:     Path string of location of model weights.
     :param sc_threshold:    If > 0 represent the scene change threshold used to generate the reference frames for
                             ProPainter, range [0,1]. Default = 0.1
+    :param sc_min_freq:     Minimum number of frames that must elapse between two accepted scene changes.
+                            If > 0, it is clamped to a minimum of 5 frames. Default is 0 (no spacing enforced).
     :param enable_fp16:     If True use fp16 (half precision) during inference. Default: fp16 (for RTX30 or above)
     :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Default: 0
     :param inference_mode:  Enable/Disable torch inference mode. Default: False
@@ -263,7 +269,7 @@ def propainter_inpaint(
     # ----------------------------------------- ModifyFrame -----------------------------------------------------------
 
     if sc_threshold > 0:
-        clip = scene_detect(clip, threshold=sc_threshold)
+        clip = scene_detect(clip, threshold=sc_threshold, frequency=sc_min_freq)
         sc_thresh = True
     else:
         sc_thresh = False

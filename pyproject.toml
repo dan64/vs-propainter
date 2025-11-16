@@ -7,7 +7,7 @@ exclude = []
 
 [project]
 name = "vspropainter"
-version = "1.2.1"
+version = "1.2.2"
 description = "ProPainter function for VapourSynth"
 readme = "README.md"
 requires-python = ">=3.10"

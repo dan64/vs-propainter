@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-06-04
+LastEditTime: 2025-11-25
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -62,9 +62,11 @@ def is_img_file(filename: str = "") -> bool:
     if not os.path.isfile(filename):
         return False
 
-    fname_ext = "." + filename.split(".")[1]
-
-    return (fname_ext in _IMG_EXTENSIONS)
+    try:
+        with Image.open(filename) as img:
+            return img.format is not None
+    except (OSError, ValueError):
+        return False
 
 
 def clip_crop(clip: vs.VideoNode, region: tuple[int, int, int, int]) -> vs.VideoNode:
@@ -193,36 +195,88 @@ def mask_overlay(
 
 
 def scene_detect(clip: vs.VideoNode, threshold: float = 0.1, frequency: int = 0) -> vs.VideoNode:
+    """
+    Detect scene changes in a video clip while enforcing a minimum frame distance between detections.
+
+    This function uses MiscFilters' SCDetect to identify potential scene changes, then suppresses
+    any detected change that occurs within `frequency` frames of the previously accepted scene change.
+    Frame 0 is always treated as a scene change (common convention for keyframe placement).
+
+    note::
+        This implementation uses internal mutable state to track the last accepted scene change frame.
+        As such, it **assumes sequential, single-threaded frame access** (e.g., during linear encoding).
+        It is **not safe for random access, multithreaded evaluation, or caching with reordering**.
+        For robust use in complex scripts, consider precomputing scene changes externally.
+
+    Parameters
+    ----------
+    clip : vs.VideoNode
+        Input video clip. Should be a standard RGB or YUV clip (will be converted to GRAY8 internally).
+    threshold : float, optional
+        Sensitivity threshold for SCDetect (lower = more sensitive). Default is 0.1.
+        If set to 0, the function returns the input clip unchanged.
+    frequency : int, optional
+        Minimum number of frames that must elapse between two accepted scene changes.
+        If > 0, it is clamped to a minimum of 5 frames. Default is 0 (no spacing enforced).
+
+    Returns
+    -------
+    vs.VideoNode
+        Clip with `_SceneChangePrev` frame property set to 1 only on frames that are:
+        - The first frame (n=0), OR
+        - Detected as a scene change by SCDetect AND at least `frequency` frames after the last accepted change.
+
+        All other frames have `_SceneChangePrev` set to 0. The `_SceneChangeNext` is also set to 0.
+
+    Raises
+    ------
+    vs.Error
+        If the 'MiscFilters' plugin (providing `misc.SCDetect`) is not installed or fails to load.
+
+    Examples
+    --------
+    clip = scene_detect(clip, threshold=0.15, frequency=10) # Ensures at least 10 frames between scene changes
+    """
 
     if threshold == 0:
         return clip
 
-    sc = clip.resize.Point(format=vs.GRAY8, matrix_s='709')
+    if frequency > 0:
+        frequency = max(5, frequency)  # Enforce minimum spacing of 5 frames
+
+    # Convert to GRAY8 for SCDetect (required format)
+    sc_clip = clip.resize.Point(format=vs.GRAY8, matrix_s="709")
 
     try:
-        sc = sc.misc.SCDetect(threshold=threshold)
-    except Exception as error:
-        raise vs.Error("propainter: plugin 'MiscFilters.dll' not properly loaded/installed: -> " + str(error))
+        sc_clip = sc_clip.misc.SCDetect(threshold=threshold)
+    except Exception as e:
+        raise vs.Error(f"scene_detect: 'MiscFilters' plugin not installed or failed: {e}")
 
-    def set_scene_change(n, f, freq: int = 0) -> vs.VideoFrame:
+    # Use a mutable container to track last accepted scene change frame
+    # Not thread-safe! Assumes sequential frame access.
+    state = {"last_sc": -1000}  # Initialize far enough in the past to not block early scenes
 
-        f_out = f[0].copy()
+    def enforce_min_distance(n: int, f: list[vs.VideoFrame], freq: int) -> vs.VideoFrame:
+        src_frame, sc_frame = f[0], f[1]
+        out = src_frame.copy()
 
-        is_scenechange = (n == 0) or (f[1].props['_SceneChangePrev'] == 1 and f[1].props['_SceneChangeNext'] == 0)
+        is_sc = False
 
-        if freq > 10:
-            is_scenechange = is_scenechange or (n % freq == 0)
+        if n == 0:
+            is_sc = True
+        elif sc_frame.props.get("_SceneChangePrev", 0) == 1:
+            if (n - state["last_sc"]) > freq:
+                is_sc = True
 
-        if is_scenechange:
-            # vs.core.log_message(2, "SceneDetect n= " + str(n))
-            f_out.props['_SceneChangePrev'] = 1
-            f_out.props['_SceneChangeNext'] = 0
+        if is_sc:
+            state["last_sc"] = n
+            out.props["_SceneChangePrev"] = 1
+            out.props['_SceneChangeNext'] = 0
         else:
-            f_out.props['_SceneChangePrev'] = 0
-            f_out.props['_SceneChangeNext'] = 0
+            out.props["_SceneChangePrev"] = 0
+            out.props['_SceneChangeNext'] = 0
 
-        return f_out
+        return out
 
-    sc = clip.std.ModifyFrame(clips=[clip, sc], selector=partial(set_scene_change, freq=frequency))
-
-    return sc
+    result = clip.std.ModifyFrame(clips=[clip, sc_clip], selector=partial(enforce_min_distance, freq=frequency))
+    return result
