@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2024-06-23
+LastEditTime: 2026-01-02
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -39,8 +39,6 @@ torch.backends.cudnn.benchmark = True
 
 
 class ModelProPainterOut:
-    _instance = None
-    _initialized = False
     _w = None
     _h = None
     model = None
@@ -64,27 +62,20 @@ class ModelProPainterOut:
     clip_size = None
     outpaint_size = None
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self, torch_device=None, weights_dir: str = None, mask_dilation: int = 4,
                  outpaint_size: tuple[int, int] = None,
                  neighbor_length: int = 10, ref_stride: int = 4, raft_iter: int = 20,
                  clip_size: tuple[int, int] = None):
 
-        if not self._initialized:
-            self.model_dir = weights_dir
-            self.neighbor_length = neighbor_length
-            self.mask_dilation = mask_dilation
-            self.neighbor_stride = self.neighbor_length // 2
-            self.ref_stride = ref_stride
-            self.raft_iter = raft_iter
-            self.clip_size = clip_size
-            self.outpaint_size = outpaint_size
-            self.model_init(torch_device, model_dir)
-            self._initialized = True
+        self.model_dir = weights_dir
+        self.neighbor_length = neighbor_length
+        self.mask_dilation = mask_dilation
+        self.neighbor_stride = self.neighbor_length // 2
+        self.ref_stride = ref_stride
+        self.raft_iter = raft_iter
+        self.clip_size = clip_size
+        self.outpaint_size = outpaint_size
+        self.model_init(torch_device, model_dir)
 
     def _binary_mask(self, mask, th=0.1):
         mask[mask > th] = 1
@@ -377,8 +368,6 @@ class ModelProPainterOut:
 
 
 class ModelProPainterIn:
-    _instance = None
-    _initialized = False
     _w = None
     _h = None
     model = None
@@ -406,25 +395,18 @@ class ModelProPainterIn:
     mask_dilation = None
     clip_size = None
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self, torch_device=None, weights_dir: str = None, mask_path: str = None, mask_dilation: int = 4,
                  neighbor_length: int = 10, ref_stride: int = 4, raft_iter: int = 20,
                  clip_size: tuple[int, int] = None):
 
-        if not self._initialized:
-            self.model_dir = weights_dir
-            self.neighbor_length = neighbor_length
-            self.mask_dilation = mask_dilation
-            self.neighbor_stride = self.neighbor_length // 2
-            self.ref_stride = ref_stride
-            self.raft_iter = raft_iter
-            self.clip_size = clip_size
-            self.model_init(torch_device, model_dir, mask_path)
-            self._initialized = True
+        self.model_dir = weights_dir
+        self.neighbor_length = neighbor_length
+        self.mask_dilation = mask_dilation
+        self.neighbor_stride = self.neighbor_length // 2
+        self.ref_stride = ref_stride
+        self.raft_iter = raft_iter
+        self.clip_size = clip_size
+        self.model_init(torch_device, model_dir, mask_path)
 
     def _binary_mask(self, mask, th=0.1):
         mask[mask > th] = 1

@@ -24,7 +24,7 @@ from functools import partial
 from vspropainter.propainter_render import ModelProPainterIn, ModelProPainterOut
 from vspropainter.propainter_utils import *
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
