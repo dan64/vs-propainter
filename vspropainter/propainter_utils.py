@@ -280,3 +280,35 @@ def scene_detect(clip: vs.VideoNode, threshold: float = 0.1, frequency: int = 0)
 
     result = clip.std.ModifyFrame(clips=[clip, sc_clip], selector=partial(enforce_min_distance, freq=frequency))
     return result
+
+def debug_ModifyFrame(f_start: int = 0, f_end: int = 1, clip: vs.VideoNode = None,
+                      clips: list[vs.VideoNode] = None, selector: partial = None, silent: bool = True) -> vs.VideoNode:
+    f_end = min(f_end, clip.num_frames - 1)
+    if len(clips) == 1:
+        if f_start > 0:
+            frame = clips[0].get_frame(0)
+            if not silent:
+                print("Debug Frame: ", 0)
+            selector(0, frame)
+        for n in range(f_start, f_end):
+            frame = clips[0].get_frame(n)
+            if not silent:
+                print("Debug Frame: ", n)
+            selector(n, frame)
+    else:
+        if f_start > 0:
+            frame = []
+            for j in range(0, len(clips)):
+                frame.append(clips[j].get_frame(0))
+            if not silent:
+                print("Debug Frame: ", 0)
+            selector(0, frame)
+        for n in range(f_start, f_end):
+            frame = []
+            for j in range(0, len(clips)):
+                frame.append(clips[j].get_frame(n))
+            if not silent:
+                print("Debug Frame: ", n)
+            selector(n, frame)
+
+    return clip

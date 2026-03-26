@@ -14,7 +14,7 @@ import os
 import cv2
 import numpy as np
 import scipy.ndimage
-from PIL import Image
+from PIL import Image, ImageFilter
 
 import torch
 
@@ -396,7 +396,7 @@ class ModelProPainterIn:
     clip_size = None
 
     def __init__(self, torch_device=None, weights_dir: str = None, mask_path: str = None, mask_dilation: int = 4,
-                 neighbor_length: int = 10, ref_stride: int = 4, raft_iter: int = 20,
+                 mask_enhance: bool = True, neighbor_length: int = 10, ref_stride: int = 4, raft_iter: int = 20,
                  clip_size: tuple[int, int] = None):
 
         self.model_dir = weights_dir
@@ -406,7 +406,7 @@ class ModelProPainterIn:
         self.ref_stride = ref_stride
         self.raft_iter = raft_iter
         self.clip_size = clip_size
-        self.model_init(torch_device, model_dir, mask_path)
+        self.model_init(torch_device, model_dir, mask_path, mask_enhance)
 
     def _binary_mask(self, mask, th=0.1):
         mask[mask > th] = 1
@@ -507,7 +507,19 @@ class ModelProPainterIn:
         self.img_mask = self.img_mask.crop((left, top, right, bottom))
         self.img_mask_is_cropped = True
 
-    def model_init(self, torch_device, model_dir: str = None, mpath: str = None):
+    def enhance_mask_edges(self, img_mask: Image) -> Image:
+
+        mask_img = np.array(img_mask.convert('L'))
+        mask_img = np.where(mask_img > 128, 255, 0).astype(np.uint8)
+
+        mask = Image.fromarray(mask_img, mode='L').convert("RGB")
+
+        mask_b = mask.filter(ImageFilter.BLUR)
+
+        return mask_b
+
+
+    def model_init(self, torch_device, model_dir: str = None, mpath: str = None, mask_enhance: bool = True):
         self.device = torch_device
 
         self.img_mask_is_cropped = False
@@ -522,6 +534,8 @@ class ModelProPainterIn:
                 self.img_mask = img_m
             else:
                 self.img_mask = img_m.resize(self.clip_size)
+            if mask_enhance:
+                self.img_mask = self.enhance_mask_edges(self.img_mask)
         self.img_mask_orig = self.img_mask
 
         ##############################################

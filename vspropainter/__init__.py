@@ -24,7 +24,7 @@ from functools import partial
 from vspropainter.propainter_render import ModelProPainterIn, ModelProPainterOut
 from vspropainter.propainter_utils import *
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
@@ -37,6 +37,7 @@ def propainter(
         clip_mask: vs.VideoNode = None,
         img_mask_path: str = None,
         mask_dilation: int = 4,
+        mask_enhance: bool = True,
         neighbor_length: int = 10,
         ref_stride: int = 10,
         raft_iter: int = 20,
@@ -58,6 +59,7 @@ def propainter(
     :param clip_mask:       Clip mask, must be of the same size and length of input clip. Default: None
     :param img_mask_path:   Path of the mask image, must be of the same size of input clip: Default: None
     :param mask_dilation:   Mask dilation for video and flow masking. Default: 4
+    :param mask_enhance:    If true the Mask's hedges are improved to allow better Mask recognition. Default: True
     :param neighbor_length: Length of local neighboring frames. Low values decrease the memory usage.
                             High values could help to improve the quality on fast moving sequences.
                             Default: 10
@@ -87,9 +89,9 @@ def propainter(
         raise vs.Error("propainter: model must be 0 or 1")
 
     if model == 0:
-        return propainter_inpaint(clip, length, clip_mask, img_mask_path, mask_dilation, neighbor_length, ref_stride,
-                                  raft_iter, mask_region, sc_threshold, sc_min_freq, weights_dir, enable_fp16,
-                                  device_index, inference_mode)
+        return propainter_inpaint(clip, length, clip_mask, img_mask_path, mask_dilation, mask_enhance, neighbor_length,
+                                  ref_stride, raft_iter, mask_region, sc_threshold, sc_min_freq, weights_dir,
+                                  enable_fp16, device_index, inference_mode)
     else:
         return propainter_outpaint(clip, length, outpaint_size, mask_dilation, neighbor_length,
                                    ref_stride, raft_iter, weights_dir, enable_fp16, device_index, inference_mode)
@@ -101,7 +103,8 @@ def propainter_inpaint(
         length: int = 100,
         clip_mask: vs.VideoNode = None,
         img_mask_path: str = None,
-        mask_dilation: int = 8,
+        mask_dilation: int = 4,
+        mask_enhance: bool = True,
         neighbor_length: int = 10,
         ref_stride: int = 10,
         raft_iter: int = 20,
@@ -120,7 +123,8 @@ def propainter_inpaint(
                             increase the inference speed but will increase also the memory usage. Default: 100
     :param clip_mask:       Clip mask, must be of the same size and length of input clip. Default: None
     :param img_mask_path:   Path of the mask image, must be of the same size of input clip: Default: None
-    :param mask_dilation:   Mask dilation for video and flow masking. Default: 8
+    :param mask_dilation:   Mask dilation for video and flow masking. Default: 4
+    :param mask_enhance:    If true the Mask's hedges are improved to allow better Mask recognition. Default: True
     :param neighbor_length: Length of local neighboring frames. Low values decrease the memory usage.
                             High values could help to improve the quality on fast moving sequences.
                             Default: 10
@@ -274,7 +278,7 @@ def propainter_inpaint(
     else:
         sc_thresh = False
 
-    ppaint = ModelProPainterIn(device, weights_dir, img_mask_path, mask_dilation, neighbor_length,
+    ppaint = ModelProPainterIn(device, weights_dir, img_mask_path, mask_dilation, mask_enhance, neighbor_length,
                                ref_stride, raft_iter, (clip.width, clip.height))
 
     base = clip.std.BlankClip(width=clip.width, height=clip.height, keep=True)
@@ -284,15 +288,28 @@ def propainter_inpaint(
             clip_new = base.std.ModifyFrame(clips=[clip, base], selector=partial(inference_img_mask, v_clip=clip,
                                                                                  ppaint=ppaint, batch_size=length,
                                                                                  use_half=use_half,
-                                                                                 sc_thresh=sc_thresh))
+                                                                             sc_thresh=sc_thresh))
+            """
+            clip_new = debug_ModifyFrame(f_start=0, f_end=50, clip=base,
+                                          clips=[clip, base], selector=partial(inference_img_mask, v_clip=clip,
+                                          ppaint=ppaint, batch_size=length, use_half=use_half,
+                                          sc_thresh=sc_thresh), silent=True)
+            """
         else:
             ppaint.img_mask_crop(mask_region)
             base_c = clip_crop(base, mask_region)
             clip_c = clip_crop(clip, mask_region)
+            #"""
             v_cropped = base_c.std.ModifyFrame(clips=[clip_c, base_c],
                                                selector=partial(inference_img_mask, v_clip=clip_c,
                                                                 ppaint=ppaint, batch_size=length, use_half=use_half,
                                                                 sc_thresh=sc_thresh))
+            """
+            v_cropped = debug_ModifyFrame(f_start=0, f_end=50, clip=base_c,
+                                          clips=[clip_c, base_c], selector=partial(inference_img_mask, v_clip=clip_c,
+                                          ppaint=ppaint, batch_size=length, use_half=use_half,
+                                          sc_thresh=sc_thresh), silent=True)
+            """
             clip_new = mask_overlay(clip, v_cropped, x=mask_region[2], y=mask_region[3])
     else:
         if mask_region is None:
