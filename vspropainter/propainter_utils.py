@@ -734,9 +734,12 @@ def SCDetect(clip: vs.VideoNode, threshold: float = 0.1, plane: int = 0) -> vs.V
     if clip.num_frames < 2:
         raise vs.Error('SCDetect: clip must have more than one frame')
 
+    # prev_stats[n] = diff(frame_{n-1}, frame_n) → SceneChangePrev
+    # next_stats[n] = diff(frame_n, frame_{n+1}) → SceneChangeNext
     prev_shifted = clip.std.DuplicateFrames(0).std.Trim(last=clip.num_frames - 1)
-    prev_stats = core.std.PlaneStats(prev_shifted, clip, plane=plane)
-    next_stats = core.std.PlaneStats(clip, clip.std.Trim(first=1), plane=plane)
+    prev_stats = vs.core.std.PlaneStats(prev_shifted, clip, plane=plane)
+    next_shifted = clip.std.DuplicateFrames(clip.num_frames - 1).std.Trim(first=1)
+    next_stats = vs.core.std.PlaneStats(clip, next_shifted, plane=plane)
 
     def _set_sc_props(n: int, f: list[vs.VideoFrame]) -> vs.VideoFrame:
         fout = f[0].copy()
