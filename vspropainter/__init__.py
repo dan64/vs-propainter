@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2025-11-25
+LastEditTime: 2026-05-20
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -24,7 +24,7 @@ from functools import partial
 from vspropainter.propainter_render import ModelProPainterIn, ModelProPainterOut
 from vspropainter.propainter_utils import *
 
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 
@@ -118,7 +118,7 @@ def propainter_inpaint(
 ) -> vs.VideoNode:
     """ProPainter: Improving Propagation and Transformer for Video Inpainting
 
-    :param clip:            Clip to process. Only RGB24 "full range" format is supported.
+    :param clip:            Clip to process, any format is supported.
     :param length:          Sequence length that the model processes (min. 12 frames). High values will
                             increase the inference speed but will increase also the memory usage. Default: 100
     :param clip_mask:       Clip mask, must be of the same size and length of input clip. Default: None
@@ -147,8 +147,7 @@ def propainter_inpaint(
     if not isinstance(clip, vs.VideoNode):
         raise vs.Error("propainter: this is not a clip")
 
-    if clip.format.id != vs.RGB24:
-        raise vs.Error("propainter: only RGB24 format is supported")
+    clip, orig_fmt = convert_format_RGB24(clip)
 
     if not (clip_mask is None):
         if not isinstance(clip_mask, vs.VideoNode):
@@ -161,8 +160,8 @@ def propainter_inpaint(
         if clip_mask.height != clip.height:
             raise vs.Error(
                 f"propainter: clip_mask must have the same height of clip -> {clip_mask.height} <> {clip.height}")
-        if clip_mask.format.id != vs.RGB24:
-            raise vs.Error("propainter: only RGB24 clip_mask format is supported")
+
+        clip_mask, mask_orig_fmt = convert_format_RGB24(clip_mask)
 
     if not (img_mask_path is None):
         if not is_img_file(img_mask_path):
@@ -328,7 +327,9 @@ def propainter_inpaint(
                                                                 sc_thresh=sc_thresh))
             clip_new = mask_overlay(clip, v_cropped, x=mask_region[2], y=mask_region[3])
 
-    return clip_new
+    clip_restored = restore_format(clip_new, orig_fmt)
+
+    return clip_restored
 
 
 def propainter_outpaint(
@@ -367,8 +368,7 @@ def propainter_outpaint(
     if not isinstance(clip, vs.VideoNode):
         raise vs.Error("propainter: this is not a clip")
 
-    if clip.format.id != vs.RGB24:
-        raise vs.Error("propainter: only RGB24 format is supported")
+    clip, orig_fmt = convert_format_RGB24(clip)
 
     if (outpaint_size is None):
         raise vs.Error("propainter: please provide the outpainting size (width, height)")
@@ -440,4 +440,6 @@ def propainter_outpaint(
                                                      ppaint=ppaint,
                                                      batch_size=length,
                                                      use_half=use_half))
-    return clip_new
+    clip_restored = restore_format(clip_new, orig_fmt)
+
+    return clip_restored

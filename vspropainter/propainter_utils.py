@@ -4,7 +4,7 @@ Author: Dan64
 Date: 2024-05-26
 version:
 LastEditors: Dan64
-LastEditTime: 2025-11-25
+LastEditTime: 2026-05-20
 -------------------------------------------------------------------------------
 Description:
 -------------------------------------------------------------------------------
@@ -19,12 +19,445 @@ from PIL import Image
 import numpy as np
 import vapoursynth as vs
 from functools import partial
-from typing import Sequence
+from typing import Sequence, NamedTuple
 
 core = vs.core
 
 _IMG_EXTENSIONS = ['.png', '.PNG', '.jpg', '.JPG', '.jpeg', '.JPEG',
                    '.ppm', '.PPM', '.bmp', '.BMP']
+
+
+# Using NamedTuple for better compatibility with VapourSynth's typical usage patterns
+class ClipInfo(NamedTuple):
+    clip_orig: vs.VideoNode | None
+    format_id: int
+    color_family: vs.ColorFamily
+    bits_per_sample: int
+    matrix: int | None
+    color_range: int | None
+    chroma_resize: bool
+    # luma protect fields
+    clip_high_bitdepth: vs.VideoNode | None = None  # YUV444PS reference for luma restoration
+    preserve_luma: bool = False
+    luma_blend: float = 1.0  # 1.0 = 100% original luma, 0.0 = 100% luma
+
+
+VIDEO_EXTENSIONS = ['.mpg', '.mp4', '.m4v', '.avi', '.mkv', '.mpeg']
+
+# map integer _Matrix to zimg string
+MATRIX_INT_TO_STR = {
+    0: "rgb",
+    1: "709",
+    4: "fcc",
+    5: "470bg",
+    6: "170m",
+    7: "240m",
+    8: "ycgco",
+    9: "2020ncl",
+    10: "2020cl",
+}
+
+# bit depth threshold for automatic luma preservation
+LUMA_PROTECT_MIN_BITDEPTH = 10
+
+def _matrixIsInvalid(clip: vs.VideoNode) -> bool:
+    frame = clip.get_frame(0)
+    value = frame.props.get('_Matrix', None)
+
+    # Non specificato o riservato
+    if value in (None, 2, 3):
+        return True
+
+    # Non un membro valido dell'enum
+    if value not in vs.MatrixCoefficients.__members__.values():
+        return True
+
+    # Coerenza con il color family
+    if clip.format.color_family == vs.RGB and value != 0:
+        return True  # RGB deve avere _Matrix=0
+    if clip.format.color_family in (vs.YUV, vs.GRAY) and value == 0:
+        return True  # YUV/GRAY non può avere _Matrix=RGB
+
+    return False
+
+def _rangeIsInvalid(clip: vs.VideoNode) -> bool:
+    frame = clip.get_frame(0)
+    if vs.core.core_version.release_major < 74:
+        value = frame.props.get('_ColorRange', None)
+        return value is None or value not in vs.ColorRange.__members__.values()
+    else:
+        value = frame.props.get('_Range', None)
+        return value is None or value not in vs.Range.__members__.values()
+
+def _get_matrix_str(clip: vs.VideoNode, default: str = "709") -> str:
+    """Read _Matrix from frame props and return the equivalent zimg string."""
+    if _matrixIsInvalid(clip):
+        return default
+    matrix_val = clip.get_frame(0).props.get('_Matrix')
+    return MATRIX_INT_TO_STR.get(int(matrix_val), default)
+
+
+def _matrix_int_to_str(matrix_val, default: str = "709") -> str:
+    """Convert an integer/enum _Matrix value to the zimg string."""
+    if matrix_val is None:
+        return default
+    return MATRIX_INT_TO_STR.get(int(matrix_val), default)
+
+
+def _should_preserve_luma(clip: vs.VideoNode, preserve_luma: bool | None) -> bool:
+    """
+    Decide whether to enable luma preservation.
+    - If preserve_luma is explicitly True/False, honor it.
+    - If None (auto), enable only for high bit-depth sources (>= 10-bit) that are YUV/RGB.
+    """
+    if preserve_luma is not None:
+        return preserve_luma
+    fmt = clip.format
+    if fmt is None:
+        return False
+    if fmt.bits_per_sample < LUMA_PROTECT_MIN_BITDEPTH:
+        return False
+    # GRAY: no chroma to colorize-and-merge, luma protect is meaningless
+    if fmt.color_family == vs.GRAY:
+        return False
+    return True
+
+
+def _build_high_bitdepth_reference(clip: vs.VideoNode) -> vs.VideoNode | None:
+    """
+    Build a YUV444PS reference clip from the original high-bitdepth input.
+    Used later to extract the original Y plane in restore_format().
+    Returns None if the input can't be converted.
+    """
+    fmt = clip.format
+    if fmt is None:
+        return None
+
+    if fmt.color_family == vs.YUV:
+        # YUV → YUV444PS: chroma upsampling + float promotion.
+        # No matrix conversion needed (stays YUV).
+        return vs.core.resize.Bicubic(clip, format=vs.YUV444PS)
+
+    if fmt.color_family == vs.RGB:
+        # RGB → YUV444PS: needs a matrix. Use BT.709 as a conventional choice
+        # for HD content; this matrix is only used to derive Y for protection.
+        return vs.core.resize.Bicubic(
+            clip,
+            format=vs.YUV444PS,
+            matrix_s="709",
+            range_in_s="full",
+            range_s="limited",
+        )
+
+    return None
+
+
+"""
+------------------------------------------------------------------------------- 
+Author: Dan64
+------------------------------------------------------------------------------- 
+Description: 
+------------------------------------------------------------------------------- 
+function to convert video clip to RGB24 format and to restore the original format
+"""
+
+def convert_format_RGB24(
+    clip: vs.VideoNode,
+    chroma_resize: bool = False,
+    preserve_luma: bool | None = None,
+    luma_blend: float = 1.0,
+) -> tuple[vs.VideoNode, ClipInfo]:
+    """
+    Convert any clip to RGB24 (8-bit full-range RGB).
+
+    :param clip:           input clip (YUV/RGB/GRAY, any bit depth)
+    :param chroma_resize:  if True, resize to a chroma-friendly size
+    :param preserve_luma:  if True, keep a YUV444PS copy of the source so the
+                           original high-bitdepth luma can be restored in
+                           restore_format(). If None (default), auto-enable
+                           for sources with bit depth >= 10.
+    :param luma_blend:     blend factor for luma restoration in [0.0, 1.0].
+                           1.0 = use 100% original luma (default),
+                           0.0 = use 100% produced luma.
+    :return: (rgb24_clip, ClipInfo)
+    """
+
+    # Store original clip information before any processing
+    original_format = clip.format
+    if original_format is None:
+        vs.Error("Clip must have a defined format")
+
+    if not isinstance(clip, vs.VideoNode):
+        vs.Error("convert_format_RGB24: Input is not a valid clip.")
+
+    # Decide luma protect and build the reference clip if needed
+    do_preserve_luma = _should_preserve_luma(clip, preserve_luma)
+    high_bd_clip = _build_high_bitdepth_reference(clip) if do_preserve_luma else None
+    # If reference build failed, disable luma protect rather than crash later
+    if do_preserve_luma and high_bd_clip is None:
+        do_preserve_luma = False
+    # Clamp blend factor
+    luma_blend = max(0.0, min(1.0, float(luma_blend)))
+
+    # Fast path: already RGB24, assume was produced in RGB24 it
+    if clip.format.id == vs.RGB24:
+        if vs.core.core_version.release_major < 74:
+            clip_color_range = vs.ColorRange(vs.RANGE_FULL)
+        else:
+            clip_color_range = vs.Range(vs.RANGE_FULL)
+
+        clip_info = ClipInfo(
+            clip_orig=clip if chroma_resize else None,
+            format_id=original_format.id,
+            color_family=original_format.color_family,
+            bits_per_sample=original_format.bits_per_sample,
+            matrix=vs.MatrixCoefficients(vs.MATRIX_RGB),
+            color_range=clip_color_range,
+            chroma_resize=chroma_resize,
+            clip_high_bitdepth=high_bd_clip,
+            preserve_luma=do_preserve_luma,
+            luma_blend=luma_blend,
+        )
+        if chroma_resize:
+            clip = resize_min_HW(clip)
+        return clip, clip_info
+
+    # Not RGB24: normalize missing color metadata to sane defaults
+    if _matrixIsInvalid(clip):
+        clip = clip.std.SetFrameProps(_Matrix=vs.MATRIX_BT709)
+    if _rangeIsInvalid(clip):
+        if vs.core.core_version.release_major < 74:
+            clip = clip.std.SetFrameProps(_ColorRange=vs.RANGE_LIMITED)
+        else:
+            clip = clip.std.SetFrameProps(_Range=vs.RANGE_LIMITED)
+
+    # Read props after normalization, so ClipInfo reflects the actual values
+    frame = clip.get_frame(0)
+    props = frame.props
+
+    if vs.core.core_version.release_major < 74:
+        clip_color_range = vs.ColorRange(props.get('_ColorRange', vs.RANGE_LIMITED.value))
+    else:
+        clip_color_range = vs.Range(props.get('_Range', vs.RANGE_LIMITED.value))
+
+    clip_info = ClipInfo(
+        clip_orig=clip if chroma_resize else None,
+        format_id=original_format.id,
+        color_family=original_format.color_family,
+        bits_per_sample=original_format.bits_per_sample,
+        matrix=vs.MatrixCoefficients(props.get('_Matrix', vs.MATRIX_BT709.value)),
+        color_range=clip_color_range,
+        chroma_resize=chroma_resize,
+        clip_high_bitdepth=high_bd_clip,
+        preserve_luma=do_preserve_luma,
+        luma_blend=luma_blend,
+    )
+
+    if chroma_resize:
+        clip = resize_min_HW(clip)
+
+    # Ensure we're working with 8-bit before the RGB conversion
+    if clip.format.bits_per_sample != 8:
+        clip = vs.core.resize.Bicubic(clip, format=clip.format.replace(bits_per_sample=8))
+
+    # Convert to RGB24 based on the original color family
+    if original_format.color_family == vs.YUV:
+        matrix_val = int(clip.get_frame(0).props.get('_Matrix', 1))
+        matrix_str = MATRIX_INT_TO_STR.get(matrix_val, "709")
+        clip = vs.core.resize.Bicubic(
+            clip,
+            format=vs.RGB24,
+            matrix_in_s=matrix_str,
+            range_in_s="limited",
+            range_s="full",
+            dither_type="error_diffusion",
+        )
+    elif original_format.color_family == vs.GRAY:
+        clip = vs.core.resize.Bicubic(
+            clip,
+            format=vs.RGB24,
+            range_in_s="limited",
+            range_s="full",
+        )
+    else:  # Already RGB but not RGB24 (e.g., RGB48, RGBS)
+        clip = vs.core.resize.Bicubic(
+            clip,
+            format=vs.RGB24,
+            range_s="full",
+        )
+
+    # After conversion to RGB, _Matrix must be RGB (0)
+    clip = clip.std.SetFrameProps(_Matrix=vs.MATRIX_RGB)
+
+    # Mark output as full-range RGB
+    if vs.core.core_version.release_major < 74:
+        clip = clip.std.SetFrameProps(_ColorRange=vs.RANGE_FULL)
+    else:
+        clip = clip.std.SetFrameProps(_Range=vs.RANGE_FULL)
+
+    return clip, clip_info
+
+
+def _restore_with_luma_protect(
+    clip: vs.VideoNode,
+    clip_info: ClipInfo,
+    target_format_id: int | None = None,
+) -> vs.VideoNode:
+    """
+    Convert the RGB24 output to YUV444PS, replace (or blend) the Y plane
+    with the original high-bitdepth luma, then convert to the target format.
+
+    :param clip:              processed clip in RGB24 full-range
+    :param clip_info:         ClipInfo from convert_format_RGB24
+    :param target_format_id:  desired output format; defaults to the original
+                              format stored in clip_info
+    """
+    if clip_info.clip_high_bitdepth is None:
+        vs.Error("restore_format: preserve_luma is set but no high-bitdepth reference is available.")
+
+    if target_format_id is None:
+        target_format_id = clip_info.format_id
+
+    # 1. Convert RGB24 output to YUV444PS (float, 4:4:4)
+    #    The matrix used here must match the matrix the original source carried,
+    #    so the merged luma stays semantically coherent with the new chroma.
+    matrix_str = _matrix_int_to_str(clip_info.matrix, default="709")
+
+    # Original color range determines the YUV target range
+    if clip_info.color_range is not None and clip_info.color_range == vs.RANGE_FULL:
+        yuv_range_s = "full"
+    else:
+        yuv_range_s = "limited"
+
+    havc_yuv = vs.core.resize.Bicubic(
+        clip,
+        format=vs.YUV444PS,
+        matrix_s=matrix_str,
+        range_in_s="full",
+        range_s=yuv_range_s,
+        dither_type="error_diffusion",
+    )
+
+    # 2. Extract Y from HAVC output and from the original high-bitdepth reference
+    havc_y = vs.core.std.ShufflePlanes(havc_yuv, planes=0, colorfamily=vs.GRAY)
+    orig_y = vs.core.std.ShufflePlanes(
+        clip_info.clip_high_bitdepth, planes=0, colorfamily=vs.GRAY
+    )
+
+    # 3. Build the protected Y plane
+    blend = clip_info.luma_blend
+    if blend >= 1.0:
+        protected_y = orig_y
+    elif blend <= 0.0:
+        protected_y = havc_y
+    else:
+        # weighted average: protected = blend * orig + (1 - blend) * havc
+        expr = f"x {blend} * y {1.0 - blend} * +"
+        protected_y = vs.core.std.Expr([orig_y, havc_y], expr=expr)
+
+    # 4. Recombine planes: protected Y + HAVC U/V
+    merged = vs.core.std.ShufflePlanes(
+        clips=[protected_y, havc_yuv, havc_yuv],
+        planes=[0, 1, 2],
+        colorfamily=vs.YUV,
+    )
+
+    # 5. Convert to the requested target format
+    if merged.format.id == target_format_id:
+        return merged
+
+    return vs.core.resize.Bicubic(
+        merged,
+        format=target_format_id,
+        dither_type="error_diffusion",
+    )
+
+
+def restore_format(
+    clip: vs.VideoNode,
+    clip_info: ClipInfo,
+    target_format_id: int | None = None,
+) -> vs.VideoNode:
+    """
+    Restore the colorized RGB24 clip to a format suitable for the original input.
+    - If original was GRAY, output YUV420P8 (8-bit color).
+    - If original was YUV, restore to original YUV format.
+    - If original was RGB, restore to original RGB format.
+    Assumes input 'clip' is full-range RGB24.
+
+    :param clip:              clip to process (must be RGB24 full-range).
+    :param clip_info:         ClipInfo struct containing original clip information.
+    :param target_format_id:  optional override of the output format. If None,
+                              uses the original format from clip_info. Useful for
+                              keeping the result in YUV444PS for further processing.
+    """
+    if not isinstance(clip, vs.VideoNode):
+        vs.Error("restore_format: Input is not a valid clip.")
+
+    if clip.format.id != vs.RGB24:
+        vs.Error("restore_format: Input clip must be RGB24.")
+
+    if clip_info.chroma_resize:
+        clip = resize_to_chroma(clip_info.clip_orig, clip)
+
+    # Luma-protect path: preserves original high-bitdepth Y
+    if clip_info.preserve_luma:
+        return _restore_with_luma_protect(clip, clip_info, target_format_id)
+
+    # Standard path (8-bit round-trip)
+    output_format_id = target_format_id if target_format_id is not None else clip_info.format_id
+
+    # If already in target format (unlikely post-colorization), return as-is
+    if clip.format.id == output_format_id:
+        return clip
+
+    if clip_info.color_family == vs.YUV:
+        matrix = clip_info.matrix if clip_info.matrix is not None else vs.MATRIX_BT709
+        range_s = "limited"
+        if clip_info.color_range is not None:
+            range_s = "full" if clip_info.color_range == vs.RANGE_FULL else "limited"
+
+        restored = vs.core.resize.Bicubic(
+            clip,
+            format=output_format_id,
+            matrix_in=vs.MATRIX_RGB,
+            matrix=matrix,
+            range_in_s="full",
+            range_s=range_s,
+            dither_type="error_diffusion",
+        )
+    elif clip_info.color_family == vs.GRAY:
+        # Original was grayscale → output 8-bit YUV (colorized result)
+        range_s = "limited"
+        if clip_info.color_range is not None:
+            range_s = "full" if clip_info.color_range == vs.RANGE_FULL else "limited"
+
+        # If target_format_id was overridden to something compatible, honor it;
+        # otherwise default to YUV420P8 (consumer-friendly colorized output).
+        gray_target = output_format_id if target_format_id is not None else vs.YUV420P8
+
+        restored = vs.core.resize.Bicubic(
+            clip,
+            format=gray_target,
+            matrix=vs.MATRIX_BT709,
+            range_in_s="full",
+            range_s=range_s,
+            dither_type="error_diffusion",
+        )
+    else:
+        # Original was RGB (but not RGB24, e.g., RGB48, RGBS)
+        range_s = "full"
+        if clip_info.color_range is not None:
+            range_s = "full" if clip_info.color_range == vs.RANGE_FULL else "limited"
+
+        restored = vs.core.resize.Bicubic(
+            clip,
+            format=output_format_id,
+            range_in_s="full",
+            range_s=range_s,
+        )
+
+    return restored
 
 
 def frame_to_image(frame: vs.VideoFrame) -> Image:
@@ -248,9 +681,9 @@ def scene_detect(clip: vs.VideoNode, threshold: float = 0.1, frequency: int = 0)
     sc_clip = clip.resize.Point(format=vs.GRAY8, matrix_s="709")
 
     try:
-        sc_clip = sc_clip.misc.SCDetect(threshold=threshold)
+        sc_clip=SCDetect(clip=sc_clip, threshold=threshold)
     except Exception as e:
-        raise vs.Error(f"scene_detect: 'MiscFilters' plugin not installed or failed: {e}")
+        raise vs.Error(f"SCDetect: {e}")
 
     # Use a mutable container to track last accepted scene change frame
     # Not thread-safe! Assumes sequential frame access.
@@ -280,6 +713,41 @@ def scene_detect(clip: vs.VideoNode, threshold: float = 0.1, frequency: int = 0)
 
     result = clip.std.ModifyFrame(clips=[clip, sc_clip], selector=partial(enforce_min_distance, freq=frequency))
     return result
+
+def SCDetect(clip: vs.VideoNode, threshold: float = 0.1, plane: int = 0) -> vs.VideoNode:
+    """
+    Scene change detection with _SceneChangePrev/_SceneChangeNext frame properties.
+    Uses std.PlaneStats-based reimplementation.
+
+    Args:
+        clip      : Input clip
+        threshold : Scene change threshold (default: 0.1, must be 0.0–1.0)
+        plane     : Plane to analyze;
+
+    Returns:
+        Clip with _SceneChangePrev and _SceneChangeNext frame properties set.
+    """
+    if not isinstance(clip, vs.VideoNode):
+        raise vs.Error('SCDetect: this is not a clip')
+    if not (0.0 <= threshold <= 1.0):
+        raise vs.Error('SCDetect: threshold must be between 0.0 and 1.0')
+    if clip.num_frames < 2:
+        raise vs.Error('SCDetect: clip must have more than one frame')
+
+    prev_shifted = clip.std.DuplicateFrames(0).std.Trim(last=clip.num_frames - 1)
+    prev_stats = core.std.PlaneStats(prev_shifted, clip, plane=plane)
+    next_stats = core.std.PlaneStats(clip, clip.std.Trim(first=1), plane=plane)
+
+    def _set_sc_props(n: int, f: list[vs.VideoFrame]) -> vs.VideoFrame:
+        fout = f[0].copy()
+        fout.props['_SceneChangePrev'] = int(float(f[1].props.get('PlaneStatsDiff', 0.0)) > threshold)
+        fout.props['_SceneChangeNext'] = int(float(f[2].props.get('PlaneStatsDiff', 0.0)) > threshold)
+        return fout
+
+    return clip.std.ModifyFrame(
+        clips=[clip, prev_stats, next_stats],
+        selector=_set_sc_props
+    )
 
 def debug_ModifyFrame(f_start: int = 0, f_end: int = 1, clip: vs.VideoNode = None,
                       clips: list[vs.VideoNode] = None, selector: partial = None, silent: bool = True) -> vs.VideoNode:
@@ -312,3 +780,106 @@ def debug_ModifyFrame(f_start: int = 0, f_end: int = 1, clip: vs.VideoNode = Non
             selector(n, frame)
 
     return clip
+
+def resize_min_HW(clip: vs.VideoNode, min_size: tuple[int, int] = (512, 480)) -> vs.VideoNode:
+    """
+    Resize clip so that the max width/height is min_size while maintaining aspect ratio.
+
+    Args:
+        clip: Input clip
+        min_size: Minimum HxW size, tuple(H,W)  (default: (512, 480))
+
+    Returns:
+        Resized clip with minium width/height is min_size (divisible by 2)
+    """
+
+    if clip.height < clip.width:
+        if clip.height >  min_size[1]:
+            return resize_to_height(clip, target_height=min_size[1])
+        else:
+            return clip # no resize
+    else:
+        if clip.width >  min_size[0]:
+            return resize_to_width(clip, target_width=min_size[0])
+        else:
+            return clip # no resize
+
+
+def resize_to_height(clip: vs.VideoNode, target_height: int = 480) -> vs.VideoNode:
+    """
+    Resize clip to target width while maintaining aspect ratio and ensuring
+    height is divisible by 2 (required for many codecs and filters).
+
+    Args:
+        clip: Input clip
+        target_height: Target height (default: 480)
+
+    Returns:
+        Resized clip with target_height and proportional width (divisible by 2)
+    """
+    # Calculate the proportional height
+    target_width = round(clip.width * target_height / clip.height)
+
+    # Ensure height is divisible by 2
+    if target_width % 2 != 0:
+        target_width -= 1  # or -= 1, but +1 is generally safer to avoid undersizing
+
+    # Resize using spline resampling
+    resized_clip = clip.resize.Spline36(width=target_width, height=target_height)
+
+    return resized_clip
+
+def resize_to_width(clip: vs.VideoNode, target_width: int = 512) -> vs.VideoNode:
+    """
+    Resize clip to target width while maintaining aspect ratio and ensuring
+    height is divisible by 2 (required for many codecs and filters).
+
+    Args:
+        clip: Input clip
+        target_width: Target width (default: 512)
+
+    Returns:
+        Resized clip with target_width and proportional height (divisible by 2)
+    """
+    # Calculate the proportional height
+    target_height = round(clip.height * target_width / clip.width)
+
+    # Ensure height is divisible by 2
+    if target_height % 2 != 0:
+        target_height += 1  # or -= 1, but +1 is generally safer to avoid undersizing
+
+    # Resize using spline resampling
+    resized_clip = clip.resize.Spline36(width=target_width, height=target_height)
+
+    return resized_clip
+
+
+def resize_to_chroma(clip_highres: vs.VideoNode, clip_lowres: vs.VideoNode) -> vs.VideoNode:
+    """
+        Perform a chroma Resize. The lowres clip will be resized to highres and the Y plane of clip_lowres
+        will be replaced by the Y plane of highres clip.
+
+        Args:
+            clip_highres: Input highres clip with original plane Y
+            clip_lowres: Input lowres clip to apply the chroma resize
+
+        Returns:
+            highres clip in RGB24 format with chroma resize
+    """
+    # perform resize if needed
+    if clip_highres.width != clip_lowres.width or clip_highres.height != clip_lowres.height:
+        clip_resized = clip_lowres.resize.Spline36(width=clip_highres.width, height=clip_highres.height)
+    else:
+        clip_resized = clip_lowres
+    # convert clips to YUV
+    clip_bw = clip_highres.resize.Bicubic(format=vs.YUV420P8, matrix_s="709", range_s="full")
+    clip_color = clip_resized.resize.Bicubic(format=vs.YUV420P8, matrix_s="709", range_s="full")
+    # restore orginal Y plane
+    clip_yuv = vs.core.std.ShufflePlanes(clips=[clip_bw, clip_color, clip_color], planes=[0, 1, 2], colorfamily=vs.YUV)
+
+    clip_yuv = clip_yuv.std.CopyFrameProps(prop_src=clip_color, props=['_SceneChangePrev', '_SceneChangeNext',
+                                                           'sc_threshold', 'sc_frequency', 'sc_luma', 'sc_ratio'])
+    # convert result to RGB24
+    return clip_yuv.resize.Bicubic(format=vs.RGB24, matrix_in_s="709", range_s="full", dither_type="error_diffusion")
+
+
