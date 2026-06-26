@@ -172,13 +172,11 @@ def convert_format_RGB24(
 
     :param clip:           input clip (YUV/RGB/GRAY, any bit depth)
     :param chroma_resize:  if True, resize to a chroma-friendly size
-    :param preserve_luma:  if True, keep a YUV444PS copy of the source so the
-                           original high-bitdepth luma can be restored in
-                           restore_format(). If None (default), auto-enable
-                           for sources with bit depth >= 10.
-    :param luma_blend:     blend factor for luma restoration in [0.0, 1.0].
-                           1.0 = use 100% original luma (default),
-                           0.0 = use 100% produced luma.
+    :param preserve_luma:  if True, preserve the original bit depth and color
+                           family in restore_format() via a simple format
+                           conversion (no luma replacement). If None (default),
+                           auto-enable for sources with bit depth >= 10.
+    :param luma_blend:     reserved for future use; currently unused.
     :return: (rgb24_clip, ClipInfo)
     """
 
@@ -190,12 +188,8 @@ def convert_format_RGB24(
     if not isinstance(clip, vs.VideoNode):
         vs.Error("convert_format_RGB24: Input is not a valid clip.")
 
-    # Decide luma protect and build the reference clip if needed
+    # Decide luma protect for high-bitdepth format preservation
     do_preserve_luma = _should_preserve_luma(clip, preserve_luma)
-    high_bd_clip = _build_high_bitdepth_reference(clip) if do_preserve_luma else None
-    # If reference build failed, disable luma protect rather than crash later
-    if do_preserve_luma and high_bd_clip is None:
-        do_preserve_luma = False
     # Clamp blend factor
     luma_blend = max(0.0, min(1.0, float(luma_blend)))
 
@@ -214,7 +208,7 @@ def convert_format_RGB24(
             matrix=vs.MatrixCoefficients(vs.MATRIX_RGB),
             color_range=clip_color_range,
             chroma_resize=chroma_resize,
-            clip_high_bitdepth=high_bd_clip,
+            clip_high_bitdepth=None,
             preserve_luma=do_preserve_luma,
             luma_blend=luma_blend,
         )
@@ -224,7 +218,10 @@ def convert_format_RGB24(
 
     # Not RGB24: normalize missing color metadata to sane defaults
     if _matrixIsInvalid(clip):
-        clip = clip.std.SetFrameProps(_Matrix=vs.MATRIX_BT709)
+        if clip.format.color_family == vs.RGB:
+            clip = clip.std.SetFrameProps(_Matrix=vs.MATRIX_RGB)
+        else:
+            clip = clip.std.SetFrameProps(_Matrix=vs.MATRIX_BT709)
     if _rangeIsInvalid(clip):
         if vs.core.core_version.release_major < 74:
             clip = clip.std.SetFrameProps(_ColorRange=vs.RANGE_LIMITED)
@@ -248,7 +245,7 @@ def convert_format_RGB24(
         matrix=vs.MatrixCoefficients(props.get('_Matrix', vs.MATRIX_BT709.value)),
         color_range=clip_color_range,
         chroma_resize=chroma_resize,
-        clip_high_bitdepth=high_bd_clip,
+        clip_high_bitdepth=None,
         preserve_luma=do_preserve_luma,
         luma_blend=luma_blend,
     )
@@ -256,8 +253,10 @@ def convert_format_RGB24(
     if chroma_resize:
         clip = resize_min_HW(clip)
 
-    # Ensure we're working with 8-bit before the RGB conversion
-    if clip.format.bits_per_sample != 8:
+    # Ensure we're working with 8-bit before the RGB conversion.
+    # RGB float formats (e.g. RGBS) cannot use format.replace(bits_per_sample=8);
+    # they are handled directly by the RGB branch below.
+    if clip.format.bits_per_sample != 8 and original_format.color_family != vs.RGB:
         clip = vs.core.resize.Bicubic(clip, format=clip.format.replace(bits_per_sample=8))
 
     # Convert to RGB24 based on the original color family
@@ -304,73 +303,67 @@ def _restore_with_luma_protect(
     target_format_id: int | None = None,
 ) -> vs.VideoNode:
     """
-    Convert the RGB24 output to YUV444PS, replace (or blend) the Y plane
-    with the original high-bitdepth luma, then convert to the target format.
+    Convert the RGB24 output to the original high-bitdepth format.
+
+    When preserve_luma is enabled, this performs a simple format conversion
+    from RGB24 to the target format, preserving the original bit depth and
+    color family without manipulating individual Y/U/V planes.
 
     :param clip:              processed clip in RGB24 full-range
     :param clip_info:         ClipInfo from convert_format_RGB24
     :param target_format_id:  desired output format; defaults to the original
-                              format stored in clip_info
+                               format stored in clip_info
     """
-    if clip_info.clip_high_bitdepth is None:
-        vs.Error("restore_format: preserve_luma is set but no high-bitdepth reference is available.")
-
     if target_format_id is None:
         target_format_id = clip_info.format_id
 
-    # 1. Convert RGB24 output to YUV444PS (float, 4:4:4)
-    #    The matrix used here must match the matrix the original source carried,
-    #    so the merged luma stays semantically coherent with the new chroma.
-    matrix_str = _matrix_int_to_str(clip_info.matrix, default="709")
+    # If already in target format, return as-is
+    if clip.format.id == target_format_id:
+        return clip
 
-    # Original color range determines the YUV target range
-    if clip_info.color_range is not None and clip_info.color_range == vs.RANGE_FULL:
-        yuv_range_s = "full"
+    if clip_info.color_family == vs.YUV:
+        matrix = clip_info.matrix if clip_info.matrix is not None else vs.MATRIX_BT709
+        range_s = "limited"
+        if clip_info.color_range is not None:
+            range_s = "full" if clip_info.color_range == vs.RANGE_FULL else "limited"
+
+        restored = vs.core.resize.Bicubic(
+            clip,
+            format=target_format_id,
+            matrix_in=vs.MATRIX_RGB,
+            matrix=matrix,
+            range_in_s="full",
+            range_s=range_s,
+            dither_type="error_diffusion",
+        )
+    elif clip_info.color_family == vs.GRAY:
+        range_s = "limited"
+        if clip_info.color_range is not None:
+            range_s = "full" if clip_info.color_range == vs.RANGE_FULL else "limited"
+
+        gray_target = target_format_id if target_format_id is not None else vs.YUV420P8
+
+        restored = vs.core.resize.Bicubic(
+            clip,
+            format=gray_target,
+            matrix=vs.MATRIX_BT709,
+            range_in_s="full",
+            range_s=range_s,
+            dither_type="error_diffusion",
+        )
     else:
-        yuv_range_s = "limited"
+        range_s = "full"
+        if clip_info.color_range is not None:
+            range_s = "full" if clip_info.color_range == vs.RANGE_FULL else "limited"
 
-    havc_yuv = vs.core.resize.Bicubic(
-        clip,
-        format=vs.YUV444PS,
-        matrix_s=matrix_str,
-        range_in_s="full",
-        range_s=yuv_range_s,
-        dither_type="error_diffusion",
-    )
+        restored = vs.core.resize.Bicubic(
+            clip,
+            format=target_format_id,
+            range_in_s="full",
+            range_s=range_s,
+        )
 
-    # 2. Extract Y from HAVC output and from the original high-bitdepth reference
-    havc_y = vs.core.std.ShufflePlanes(havc_yuv, planes=0, colorfamily=vs.GRAY)
-    orig_y = vs.core.std.ShufflePlanes(
-        clip_info.clip_high_bitdepth, planes=0, colorfamily=vs.GRAY
-    )
-
-    # 3. Build the protected Y plane
-    blend = clip_info.luma_blend
-    if blend >= 1.0:
-        protected_y = orig_y
-    elif blend <= 0.0:
-        protected_y = havc_y
-    else:
-        # weighted average: protected = blend * orig + (1 - blend) * havc
-        expr = f"x {blend} * y {1.0 - blend} * +"
-        protected_y = vs.core.std.Expr([orig_y, havc_y], expr=expr)
-
-    # 4. Recombine planes: protected Y + HAVC U/V
-    merged = vs.core.std.ShufflePlanes(
-        clips=[protected_y, havc_yuv, havc_yuv],
-        planes=[0, 1, 2],
-        colorfamily=vs.YUV,
-    )
-
-    # 5. Convert to the requested target format
-    if merged.format.id == target_format_id:
-        return merged
-
-    return vs.core.resize.Bicubic(
-        merged,
-        format=target_format_id,
-        dither_type="error_diffusion",
-    )
+    return restored
 
 
 def restore_format(
