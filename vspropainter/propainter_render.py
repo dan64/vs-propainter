@@ -34,8 +34,17 @@ os.environ["NUMEXPR_MAX_THREADS"] = "8"
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-# configuring torch
-torch.backends.cudnn.benchmark = True
+# configuring torch (cudnn.benchmark only applies when CUDA is actually used)
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+
+
+def empty_cache():
+    """Release cached GPU memory on whichever backend is active (CUDA or MPS)."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 class ModelProPainterOut:
@@ -231,14 +240,14 @@ class ModelProPainterOut:
 
                     gt_flows_f_list.append(flows_f)
                     gt_flows_b_list.append(flows_b)
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 gt_flows_f = torch.cat(gt_flows_f_list, dim=1)
                 gt_flows_b = torch.cat(gt_flows_b_list, dim=1)
                 gt_flows_bi = (gt_flows_f, gt_flows_b)
             else:
                 gt_flows_bi = self.fix_raft(self.frames, iters=self.raft_iter)
-                torch.cuda.empty_cache()
+                empty_cache()
 
             if use_half:
                 self.frames, self.flow_masks, self.masks_dilated = self.frames.half(), self.flow_masks.half(), self.masks_dilated.half()
@@ -266,7 +275,7 @@ class ModelProPainterOut:
 
                     pred_flows_f.append(pred_flows_bi_sub[0][:, pad_len_s:e_f - s_f - pad_len_e])
                     pred_flows_b.append(pred_flows_bi_sub[1][:, pad_len_s:e_f - s_f - pad_len_e])
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 pred_flows_f = torch.cat(pred_flows_f, dim=1)
                 pred_flows_b = torch.cat(pred_flows_b, dim=1)
@@ -275,7 +284,7 @@ class ModelProPainterOut:
                 self.pred_flows_bi, _ = self.fix_flow_complete.forward_bidirect_flow(gt_flows_bi, self.flow_masks)
                 self.pred_flows_bi = self.fix_flow_complete.combine_flow(gt_flows_bi, self.pred_flows_bi,
                                                                          self.flow_masks)
-                torch.cuda.empty_cache()
+                empty_cache()
 
             # ---- image propagation ----
             self.masked_frames = self.frames * (1 - self.masks_dilated)
@@ -302,7 +311,7 @@ class ModelProPainterOut:
 
                     updated_frames.append(updated_frames_sub[:, pad_len_s:e_f - s_f - pad_len_e])
                     updated_masks.append(updated_masks_sub[:, pad_len_s:e_f - s_f - pad_len_e])
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 self.updated_frames = torch.cat(updated_frames, dim=1)
                 self.updated_masks = torch.cat(updated_masks, dim=1)
@@ -313,7 +322,7 @@ class ModelProPainterOut:
                 self.updated_frames = self.frames * (1 - self.masks_dilated) + prop_imgs.view(b, t, 3, h,
                                                                                               w) * self.masks_dilated
                 self.updated_masks = updated_local_masks.view(b, t, 1, h, w)
-                torch.cuda.empty_cache()
+                empty_cache()
 
     def feature_propagation(self, convert_to_pil: bool = False, out_size: list = None, ref_num: int = -1):
 
@@ -356,14 +365,14 @@ class ModelProPainterOut:
 
                     comp_frames[idx] = comp_frames[idx].astype(np.uint8)
 
-            torch.cuda.empty_cache()
+            empty_cache()
 
         if convert_to_pil:
             np_comp_frames = [Image.fromarray(cv2.resize(f, out_size), 'RGB') for f in comp_frames]
         else:
             np_comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
 
-        torch.cuda.empty_cache()
+        empty_cache()
         return np_comp_frames
 
 
@@ -609,14 +618,14 @@ class ModelProPainterIn:
 
                     gt_flows_f_list.append(flows_f)
                     gt_flows_b_list.append(flows_b)
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 gt_flows_f = torch.cat(gt_flows_f_list, dim=1)
                 gt_flows_b = torch.cat(gt_flows_b_list, dim=1)
                 gt_flows_bi = (gt_flows_f, gt_flows_b)
             else:
                 gt_flows_bi = self.fix_raft(self.frames, iters=self.raft_iter)
-                torch.cuda.empty_cache()
+                empty_cache()
 
             if use_half:
                 self.frames, self.flow_masks, self.masks_dilated = self.frames.half(), self.flow_masks.half(), self.masks_dilated.half()
@@ -644,7 +653,7 @@ class ModelProPainterIn:
 
                     pred_flows_f.append(pred_flows_bi_sub[0][:, pad_len_s:e_f - s_f - pad_len_e])
                     pred_flows_b.append(pred_flows_bi_sub[1][:, pad_len_s:e_f - s_f - pad_len_e])
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 pred_flows_f = torch.cat(pred_flows_f, dim=1)
                 pred_flows_b = torch.cat(pred_flows_b, dim=1)
@@ -653,7 +662,7 @@ class ModelProPainterIn:
                 self.pred_flows_bi, _ = self.fix_flow_complete.forward_bidirect_flow(gt_flows_bi, self.flow_masks)
                 self.pred_flows_bi = self.fix_flow_complete.combine_flow(gt_flows_bi, self.pred_flows_bi,
                                                                          self.flow_masks)
-                torch.cuda.empty_cache()
+                empty_cache()
 
             # ---- image propagation ----
             self.masked_frames = self.frames * (1 - self.masks_dilated)
@@ -680,7 +689,7 @@ class ModelProPainterIn:
 
                     updated_frames.append(updated_frames_sub[:, pad_len_s:e_f - s_f - pad_len_e])
                     updated_masks.append(updated_masks_sub[:, pad_len_s:e_f - s_f - pad_len_e])
-                    torch.cuda.empty_cache()
+                    empty_cache()
 
                 self.updated_frames = torch.cat(updated_frames, dim=1)
                 self.updated_masks = torch.cat(updated_masks, dim=1)
@@ -691,7 +700,7 @@ class ModelProPainterIn:
                 self.updated_frames = self.frames * (1 - self.masks_dilated) + prop_imgs.view(b, t, 3, h,
                                                                                               w) * self.masks_dilated
                 self.updated_masks = updated_local_masks.view(b, t, 1, h, w)
-                torch.cuda.empty_cache()
+                empty_cache()
 
     def feature_propagation(self, convert_to_pil: bool = False, out_size: list = None, ref_num: int = -1):
 
@@ -734,12 +743,12 @@ class ModelProPainterIn:
 
                     comp_frames[idx] = comp_frames[idx].astype(np.uint8)
 
-            torch.cuda.empty_cache()
+            empty_cache()
 
         if convert_to_pil:
             np_comp_frames = [Image.fromarray(cv2.resize(f, out_size), 'RGB') for f in comp_frames]
         else:
             np_comp_frames = [cv2.resize(f, out_size) for f in comp_frames]
 
-        torch.cuda.empty_cache()
+        empty_cache()
         return np_comp_frames
