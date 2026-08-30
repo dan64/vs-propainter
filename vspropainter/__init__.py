@@ -31,6 +31,34 @@ os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 model_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "weights")
 
 
+def _gpu_backend_available() -> bool:
+    """True if either a CUDA or an MPS (Apple Silicon) device is available."""
+    return torch.cuda.is_available() or (
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+
+
+def _resolve_device(device_index: int) -> torch.device:
+    """Resolve device_index to a torch.device, preferring CUDA, then MPS, then CPU.
+
+    device_index == -1 always means CPU. Otherwise CUDA is used if available
+    (device_index selects which CUDA GPU); if CUDA isn't available but MPS is
+    (macOS/Apple Silicon), MPS is used instead - MPS has only a single device,
+    so device_index is ignored in that case.
+    """
+    if device_index == -1:
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda", device_index)
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # A single oversubscribed CPU thread pool competing with MPS's own
+        # dispatch/command-queue thread is a well-known source of major
+        # slowdowns (and occasional stalls) on Apple Silicon; pinning the
+        # CPU-side thread pool to 1 thread avoids that contention.
+        torch.set_num_threads(1)
+        return torch.device("mps")
+    raise vs.Error("propainter: neither CUDA nor MPS is available")
+
+
 def propainter(
         clip: vs.VideoNode,
         length: int = 80,
@@ -81,7 +109,9 @@ def propainter(
     :param sc_min_freq:     Minimum number of frames that must elapse between two accepted scene changes.
                             If > 0, it is clamped to a minimum of 5 frames. Default is 0 (no spacing enforced).
     :param enable_fp16:     If True use fp16 (half precision) during inference. Default: fp16 (for RTX30 or above)
-    :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Default: 0
+    :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Uses CUDA
+                            if available, otherwise falls back to MPS on Apple Silicon (which
+                            has only one device, so the ordinal is ignored in that case). Default: 0
     :param inference_mode:  Enable/Disable torch inference mode. Default: False
     """
 
@@ -141,7 +171,9 @@ def propainter_inpaint(
     :param sc_min_freq:     Minimum number of frames that must elapse between two accepted scene changes.
                             If > 0, it is clamped to a minimum of 5 frames. Default is 0 (no spacing enforced).
     :param enable_fp16:     If True use fp16 (half precision) during inference. Default: fp16 (for RTX30 or above)
-    :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Default: 0
+    :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Uses CUDA
+                            if available, otherwise falls back to MPS on Apple Silicon (which
+                            has only one device, so the ordinal is ignored in that case). Default: 0
     :param inference_mode:  Enable/Disable torch inference mode. Default: False
     """
     if not isinstance(clip, vs.VideoNode):
@@ -170,20 +202,16 @@ def propainter_inpaint(
     if (clip_mask is None) and (img_mask_path is None):
         raise vs.Error("propainter: a clip/image mask must be provided")
 
-    if device_index != -1 and not torch.cuda.is_available():
-        raise vs.Error("propainter: CUDA is not available")
+    if device_index != -1 and not _gpu_backend_available():
+        raise vs.Error("propainter: neither CUDA nor MPS is available")
 
     if length < 12:
         raise vs.Error("propainter: length must be at least 12")
 
     disable_warnings()
 
-    if device_index == -1:
-        device = torch.device("cpu")
-        use_half = False
-    else:
-        device = torch.device("cuda", device_index)
-        use_half = enable_fp16
+    device = _resolve_device(device_index)
+    use_half = False if device_index == -1 else enable_fp16
 
     # enable torch inference mode
     # https://pytorch.org/docs/stable/generated/torch.autograd.grad_mode.inference_mode.html
@@ -362,7 +390,9 @@ def propainter_outpaint(
                             speed but could affect the output quality. Default: 20
     :param weights_dir:     Path string of location of model weights.
     :param enable_fp16:     If True use fp16 (half precision) during inference. Default: fp16 (for RTX30 or above)
-    :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Default: 0
+    :param device_index:    Device ordinal of the GPU (if = -1 CPU mode is enabled). Uses CUDA
+                            if available, otherwise falls back to MPS on Apple Silicon (which
+                            has only one device, so the ordinal is ignored in that case). Default: 0
     :param inference_mode:  Enable/Disable torch inference mode. Default: False
     """
     if not isinstance(clip, vs.VideoNode):
@@ -376,20 +406,16 @@ def propainter_outpaint(
     if outpaint_size[0] < clip.width and outpaint_size[1] < clip.height:
         raise vs.Error("propainter: outpainting size is lower than clip size")
 
-    if device_index != -1 and not torch.cuda.is_available():
-        raise vs.Error("propainter: CUDA is not available")
+    if device_index != -1 and not _gpu_backend_available():
+        raise vs.Error("propainter: neither CUDA nor MPS is available")
 
     if length < 10:
         raise vs.Error("propainter: length must be at least 10")
 
     disable_warnings()
 
-    if device_index == -1:
-        device = torch.device("cpu")
-        use_half = False
-    else:
-        device = torch.device("cuda", device_index)
-        use_half = enable_fp16
+    device = _resolve_device(device_index)
+    use_half = False if device_index == -1 else enable_fp16
 
     # enable torch inference mode
     # https://pytorch.org/docs/stable/generated/torch.autograd.grad_mode.inference_mode.html
